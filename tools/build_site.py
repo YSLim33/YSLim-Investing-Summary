@@ -13,6 +13,17 @@ IMGDIR = os.path.join(SITE, 'assets', 'img')
 os.makedirs(IMGDIR, exist_ok=True)
 shutil.copy(os.path.join(TOOLS, 'chart.umd.js'), os.path.join(SITE, 'assets', 'chart.umd.js'))
 
+
+# ---- Q&A (giscus = GitHub Discussions 댓글) 설정 ----
+# giscus.app에서 저장소 입력 후 발급되는 두 값을 붙여넣으면 Q&A 탭이 활성화됨.
+GISCUS = {
+    'repo': 'YSLim33/YSLim-Investing-Summary',
+    'repo_id': 'R_kgDOS4J4WQ',
+    'category': 'Q&A',
+    'category_id': 'DIC_kwDOS4J4Wc4C_DHv',
+}
+CONTACT_EMAIL = 'june.lim33@gmail.com'
+
 LINKS6 = [
  ("Financial condition & BEI & Sales/Inventory", "https://fredaccount.stlouisfed.org/public/dashboard/111622", "FRED 대시보드 111622"),
  ("Yield & Bond", "https://fredaccount.stlouisfed.org/public/dashboard/111624", "FRED 대시보드 111624"),
@@ -189,7 +200,8 @@ NAV_ITEMS.extend([('최신 브리핑','index.html','index'),('퀵 링크','links
     ('Orientation','orientation.html','orient')])
 NAV_ITEMS.extend([(y, f'archive-{y}.html', y) for y in years])
 NAV_ITEMS.extend([('2023–2024','archive-2024.html','2024'),
-    ('Factset','factset.html','factset'),('Yield','yield.html','yield')])
+    ('Factset','factset.html','factset'),('Yield','yield.html','yield'),
+    ('Q&A','qna.html','qna')])
 
 year_blocks = {}
 for y in years:
@@ -215,6 +227,26 @@ open(os.path.join(SITE,'orientation.html'),'w',encoding='utf-8').write(page('Ori
 lg = ''.join(f'<a href="{u}" target="_blank"><div class="t">{i+1}. {esc(t)}</div><div class="s">{esc(s)}</div></a>' for i,(t,u,s) in enumerate(LINKS6))
 open(os.path.join(SITE,'links.html'),'w',encoding='utf-8').write(page('퀵 링크','links',
   f'<p class="muted">Summary 시트 상단 고정 링크 6개</p><div class="linkgrid">{lg}</div>'))
+# Q&A 페이지 (giscus)
+if GISCUS['repo_id'] and GISCUS['category_id']:
+    giscus_embed = f"""<script src="https://giscus.app/client.js"
+  data-repo="{GISCUS['repo']}" data-repo-id="{GISCUS['repo_id']}"
+  data-category="{GISCUS['category']}" data-category-id="{GISCUS['category_id']}"
+  data-mapping="specific" data-term="qna" data-strict="0"
+  data-reactions-enabled="1" data-input-position="top"
+  data-theme="dark" data-lang="ko" crossorigin="anonymous" async></script>"""
+else:
+    giscus_embed = '<div class="card"><p class="line">Q&amp;A 게시판 준비 중입니다. (giscus 설정 대기)</p></div>'
+qna_body = f"""
+<div class="card"><h2>문의 및 토론</h2>
+<p class="line">Summary 내용에 대한 질문이나 의견을 남겨주세요. 답변이 달리면 이 페이지에서 확인할 수 있습니다.</p>
+<p class="line muted">· 글을 쓰려면 GitHub 계정 로그인이 필요합니다 (무료 가입). 로그인 없이 읽기는 가능합니다.<br>
+· GitHub 계정이 없으면 이메일로 보내주세요: <a href="mailto:{CONTACT_EMAIL}?subject=[Investing Summary 문의]" style="color:var(--accent)">{CONTACT_EMAIL}</a></p>
+</div>
+{giscus_embed}
+"""
+open(os.path.join(SITE,'qna.html'),'w',encoding='utf-8').write(page('Q&A','qna', qna_body))
+
 # factset / yield
 fs_rows = [tuple(c.value for c in r) for r in wb['Factset'].iter_rows()]
 fs = [[r[0].strftime('%Y-%m-%d')] + [float(x) if isinstance(x,(int,float)) else None for x in r[1:8]] for r in fs_rows if r and hasattr(r[0],'strftime')]
