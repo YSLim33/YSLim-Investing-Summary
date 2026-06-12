@@ -2,7 +2,7 @@ name: Add Weekly Snapshot Row
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 22 * * 0'   # 월요일 07:15 KST (일요일 22:15 UTC)
+    - cron: '0 22 * * 0'    # 월요일 07:00 KST (일요일 22:00 UTC)
 permissions:
   contents: write
 jobs:

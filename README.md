@@ -11,15 +11,15 @@
 
 ## 최초 설정 (1회)
 
-1. github.com에서 새 저장소 생성 (예: `investing-summary`, Public)
+1. github.com에서 새 저장소 생성 (예: `YSLim-Investing-Summary`, Public)
 2. 이 폴더 전체 업로드:
    ```bash
    git init && git add -A && git commit -m "initial"
-   git remote add origin https://github.com/YSLim33/investing-summary.git
+   git remote add origin https://github.com/YSLim33/YSLim-Investing-Summary.git
    git branch -M main && git push -u origin main
    ```
 3. 저장소 Settings → Pages → Source: **GitHub Actions** 선택
-4. 첫 배포 후 `https://yslim33.github.io/investing-summary/` 접속 확인 → 이 링크를 공유
+4. 첫 배포 후 `https://yslim33.github.io/YSLim-Investing-Summary/` 접속 확인 → 이 링크를 공유
 
 ## 매주 월요일 루틴 (회사 노트북)
 
@@ -41,7 +41,7 @@
 | 워크플로 | 트리거 | 동작 |
 |---|---|---|
 | `site.yml` | push 또는 수동 실행 | 엑셀 → 사이트 빌드 → GitHub Pages 배포 |
-| `add-week.yml` | 매주 월요일 07:15 KST + 수동 | 직전 금요일 종가(stooq)로 새 W26xx 스냅샷 행을 엑셀에 추가 후 커밋. 이미 있으면 건너뜀 |
+| `add-week.yml` | 매주 월요일 07:00 KST + 수동 | 직전 금요일 종가(stooq)로 새 W26xx 스냅샷 행 추가 + Yield 시트에 누락된 영업일 행 자동 추가(재무부 금리 + EFFR, 10Y2Y~20Y10Y 수식 자동 복사) 후 커밋. 이미 최신이면 건너뜀 |
 
 > add-week 첫 자동 실행 후에는 행이 제대로 들어갔는지 한 번 확인 권장. 러셀2000(^rut) 등 일부 심볼은 소스에서 누락될 수 있으며, 이 경우 해당 칸만 비워짐(직접 입력).
 
