@@ -6,7 +6,7 @@ Usage: python3 add_week.py "<YSLim_Investing Summary.xlsx>" [--week W2625] [--te
 - 스크립트가 만든 동일 주차 행이 있으면 최신 값으로 덮어씀.
 - 색상은 파일에 설정된 조건부 서식이 자동 적용(상승 빨강/하락 파랑).
 """
-import sys, re, zipfile, shutil, datetime as dt, urllib.request, io, csv, html
+import sys, re, zipfile, shutil, datetime as dt, urllib.request, urllib.parse, io, csv, html
 
 XLSX = sys.argv[1]
 ARGS = sys.argv[2:]
@@ -33,20 +33,37 @@ def last_friday(today=None):
     while d.weekday() != 4: d -= dt.timedelta(days=1)
     return d
 
+YAHOO = {'^dji':'^DJI','^spx':'^GSPC','^ndq':'^IXIC','tsla.us':'TSLA','soxx.us':'SOXX','^rut':'^RUT','bmnr.us':'BMNR'}
+
 def fetch_close(sym, on_or_before):
-    url = f'https://stooq.com/q/d/l/?s={sym}&i=d'
+    # 1차: stooq
     try:
-        raw = http_get(url, timeout=30)
-        rows = list(csv.reader(io.StringIO(raw)))
+        raw = http_get(f'https://stooq.com/q/d/l/?s={sym}&i=d', timeout=30)
         best = None
-        for r in rows[1:]:
+        for r in list(csv.reader(io.StringIO(raw)))[1:]:
             try:
                 d = dt.date.fromisoformat(r[0]); c = float(r[4])
             except Exception: continue
             if d <= on_or_before: best = c
-        return best
+        if best is not None: return best
+        print(f'  stooq empty for {sym} (resp: {raw[:50]!r}), trying yahoo')
     except Exception as e:
-        print(f'  fetch fail {sym}: {e}'); return None
+        print(f'  stooq fail {sym}: {e}, trying yahoo')
+    # 2차: Yahoo Finance chart API
+    try:
+        import json as _j
+        ysym = YAHOO.get(sym, sym)
+        raw = http_get(f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ysym)}?range=1mo&interval=1d', timeout=30)
+        res = _j.loads(raw)['chart']['result'][0]
+        ts = res.get('timestamp') or []
+        closes = res['indicators']['quote'][0].get('close') or []
+        best = None
+        for t, c in zip(ts, closes):
+            if c is None: continue
+            if dt.datetime.utcfromtimestamp(t).date() <= on_or_before: best = float(c)
+        return round(best, 2) if best is not None else None
+    except Exception as e:
+        print(f'  yahoo fail {sym}: {e}'); return None
 
 def col_letter(idx):  # 1->A
     s=''
@@ -130,9 +147,12 @@ TRE_COLS = ['1 Mo','2 Mo','3 Mo','6 Mo','1 Yr','2 Yr','3 Yr','5 Yr','7 Yr','10 Y
 
 def fetch_treasury_month(ym):
     """treasury.gov daily yield curve CSV -> {date: {colname: float}}"""
-    url = (f'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/'
-           f'daily-treasury-rates.csv/{ym}?type=daily_treasury_yield_curve&field_tdr_date_value={ym}&_format=csv')
-    raw = http_get(url)
+    base = 'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv'
+    try:
+        raw = http_get(f'{base}/all/{ym}?type=daily_treasury_yield_curve&field_tdr_date_value={ym}&page&_format=csv')
+    except Exception:
+        yr = ym[:4]  # 월별 주소 실패 시 연간 전체로 폴백
+        raw = http_get(f'{base}/{yr}/all?type=daily_treasury_yield_curve&field_tdr_date_value={yr}&page&_format=csv')
     rows = list(csv.reader(io.StringIO(raw)))
     hdr = rows[0]
     # 1.5 Mo / 4 Mo 등 매칭 컬럼 없는 항목 제외, 이름 정규화
