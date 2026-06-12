@@ -1,0 +1,22 @@
+name: Add Weekly Snapshot Row
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 22 * * 0'   # 월요일 07:15 KST (일요일 22:15 UTC)
+permissions:
+  contents: write
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install openpyxl
+      - run: python "tools/add_week.py" "YSLim_Investing Summary.xlsx"
+      - name: Commit if changed
+        run: |
+          git config user.name "auto-week-bot"
+          git config user.email "actions@github.com"
+          git add "YSLim_Investing Summary.xlsx"
+          git diff --cached --quiet || git commit -m "auto: weekly snapshot row" && git push
