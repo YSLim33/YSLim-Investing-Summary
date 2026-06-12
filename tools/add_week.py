@@ -3,7 +3,7 @@
 """주간 스냅샷 행 자동 추가 (2026 시트).
 Usage: python3 add_week.py "<YSLim_Investing Summary.xlsx>" [--week W2625] [--test]
 - 직전 금요일 종가(stooq.com)와 전주 대비 변동률을 마지막 W블록 2행 아래에 추가.
-- 같은 주차 라벨이 이미 있으면 아무것도 하지 않음(중복 방지).
+- 스크립트가 만든 동일 주차 행이 있으면 최신 값으로 덮어씀.
 - 색상은 파일에 설정된 조건부 서식이 자동 적용(상승 빨강/하락 파랑).
 """
 import sys, re, zipfile, shutil, datetime as dt, urllib.request, io, csv, html
@@ -15,6 +15,19 @@ SHEET = 'xl/worksheets/sheet4.xml'   # 2026 sheet
 NAMES = ['Dow','S&P500','나스닥','TSLA','SOXX','러셀2000','BMNR']
 SYMB  = ['^dji','^spx','^ndq','tsla.us','soxx.us','^rut','bmnr.us']
 
+
+def http_get(url, timeout=60):
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/csv,application/json,text/plain,*/*'})
+    import time
+    for attempt in (1, 2):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout).read().decode()
+        except Exception:
+            if attempt == 2: raise
+            time.sleep(3)
+
 def last_friday(today=None):
     d = today or dt.date.today()
     while d.weekday() != 4: d -= dt.timedelta(days=1)
@@ -23,7 +36,7 @@ def last_friday(today=None):
 def fetch_close(sym, on_or_before):
     url = f'https://stooq.com/q/d/l/?s={sym}&i=d'
     try:
-        raw = urllib.request.urlopen(url, timeout=30).read().decode()
+        raw = http_get(url, timeout=30)
         rows = list(csv.reader(io.StringIO(raw)))
         best = None
         for r in rows[1:]:
@@ -48,16 +61,20 @@ def main():
         if a.startswith('W') and len(a)==5: week=a
     z = zipfile.ZipFile(XLSX)
     sx = z.read(SHEET).decode()
-    # dedupe: label already present?
-    if f'>{week}<' in sx or f'<t>{week}</t>' in sx:
-        print(f'{week} already exists; nothing to do'); return 0
-    # find last W-row: rows whose first cell holds inline/shared string starting with W26 - simpler: track max row number with numeric cells in D
+    # 이 스크립트가 만든 행(inlineStr 라벨)이면 → 최신 값으로 덮어쓰기, 아니면 신규 추가.
+    # 사용자가 직접 입력한 라벨(shared string)이 있으면 건드리지 않고 종료.
+    existing = re.search(
+        rf'<row r="(\d+)"[^>]*>(?:(?!</row>).)*?<is><t>{week}</t>(?:(?!</row>).)*?</row>', sx, re.S)
+    if not existing and (f'>{week}<' in sx):
+        print(f'{week} exists as a manually entered row; not touching it'); return 0
     rownums = [int(m) for m in re.findall(r'<row r="(\d+)"', sx)]
-    maxr = max(rownums); newr = maxr + 2
-    # previous closes: parse last snapshot row = last row containing cells in D and G and J with numbers
+    maxr = max(rownums)
+    newr = int(existing.group(1)) if existing else maxr + 2
+    # previous closes: 마지막 스냅샷 행(덮어쓸 대상 행은 제외)
     prev = {}
     lastWrow_xml = None
     for rm in re.finditer(r'<row r="(\d+)"[^>]*>(.*?)</row>', sx, re.S):
+        if int(rm.group(1)) == newr: continue  # 자기 자신은 기준에서 제외
         body = rm.group(2)
         cells = dict(re.findall(r'<c r="([A-Z]+)\d+"[^>]*>(?:<f>[^<]*</f>)?<v>([^<]*)</v></c>', body))
         if all(k in cells for k in ('D','G','J','M','P','S','V')):
@@ -68,7 +85,7 @@ def main():
     if not prev: print('previous snapshot row not found'); return 1
     # style ids from last snapshot row
     sty = dict(re.findall(r'<c r="([A-Z]+)\d+" s="(\d+)"', lastWrow_xml or ''))
-    print(f'week={week} friday={fri} newrow={newr}')
+    print(f'week={week} friday={fri} row={newr} ({"update" if existing else "new"})')
     closes = {}
     for n, s in zip(NAMES, SYMB):
         closes[n] = 123.45 if TEST else fetch_close(s, fri)
@@ -89,8 +106,11 @@ def main():
             cells_xml.append(cell(cV, val=repr(closes[n])))
             if prev.get(n): cells_xml.append(cell(cP, val=repr(closes[n]/prev[n]-1)))
     newrow = f'<row r="{newr}">' + ''.join(cells_xml) + '</row>'
-    sx2 = sx.replace('</sheetData>', newrow + '</sheetData>', 1)
-    sx2 = re.sub(r'(<dimension ref="A1:[A-Z]+)\d+"', lambda m: f'{m.group(1)}{newr}"', sx2, 1)
+    if existing:
+        sx2 = sx.replace(existing.group(0), newrow, 1)
+    else:
+        sx2 = sx.replace('</sheetData>', newrow + '</sheetData>', 1)
+        sx2 = re.sub(r'(<dimension ref="A1:[A-Z]+)\d+"', lambda m: f'{m.group(1)}{max(maxr,newr)}"', sx2, 1)
     tmp = XLSX + '.tmp.xlsx'
     zo = zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED)
     for it in z.infolist():
@@ -98,9 +118,8 @@ def main():
     zo.close(); z.close()
     import openpyxl; openpyxl.load_workbook(tmp, read_only=True)  # validate
     shutil.move(tmp, XLSX)
-    print('row added OK')
+    print('row updated OK' if existing else 'row added OK')
     return 0
-
 
 
 # ===================== Yield 시트 자동 갱신 =====================
@@ -113,7 +132,7 @@ def fetch_treasury_month(ym):
     """treasury.gov daily yield curve CSV -> {date: {colname: float}}"""
     url = (f'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/'
            f'daily-treasury-rates.csv/{ym}?type=daily_treasury_yield_curve&field_tdr_date_value={ym}&_format=csv')
-    raw = urllib.request.urlopen(url, timeout=60).read().decode()
+    raw = http_get(url)
     rows = list(csv.reader(io.StringIO(raw)))
     hdr = rows[0]
     # 1.5 Mo / 4 Mo 등 매칭 컬럼 없는 항목 제외, 이름 정규화
@@ -141,7 +160,7 @@ def fetch_effr_range(d0, d1):
            f'?startDate={d0.isoformat()}&endDate={d1.isoformat()}')
     try:
         import json as _j
-        raw = urllib.request.urlopen(url, timeout=60).read().decode()
+        raw = http_get(url)
         out = {}
         for r in _j.loads(raw).get('refRates', []):
             out[dt.date.fromisoformat(r['effectiveDate'])] = float(r['percentRate'])
@@ -182,7 +201,6 @@ def update_yield(test=False):
             except Exception as e: print(f'  treasury {ym} fail: {e}')
         effr = fetch_effr_range(need[0], need[-1])
     newrows, r = [], lastr
-    import html as _h
     for d in need:
         if d not in tre: continue  # 휴장일
         r += 1
