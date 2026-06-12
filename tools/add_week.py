@@ -11,7 +11,7 @@ import sys, re, zipfile, shutil, datetime as dt, urllib.request, urllib.parse, i
 XLSX = sys.argv[1]
 ARGS = sys.argv[2:]
 TEST = '--test' in ARGS
-SHEET = 'xl/worksheets/sheet4.xml'   # 2026 sheet
+SHEET = None  # 런타임에 '2026' 이름으로 해석
 NAMES = ['Dow','S&P500','나스닥','TSLA','SOXX','러셀2000','BMNR']
 SYMB  = ['^dji','^spx','^ndq','tsla.us','soxx.us','^rut','bmnr.us']
 
@@ -27,6 +27,22 @@ def http_get(url, timeout=60):
         except Exception:
             if attempt == 2: raise
             time.sleep(3)
+
+
+def sheet_file(z, name):
+    """시트 이름 -> xl/worksheets/sheetN.xml (시트 추가/삭제에도 안전)"""
+    wbx = z.read('xl/workbook.xml').decode()
+    rels = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read('xl/_rels/workbook.xml.rels').decode()))
+    m = re.search(rf'<sheet name="{name}"[^>]*r:id="(rId\d+)"', wbx)
+    if not m: raise SystemExit(f'sheet not found: {name}')
+    t = rels[m.group(1)]
+    return t if t.startswith('xl/') else 'xl/' + t.lstrip('/')
+
+def table_file(z, sheetxml):
+    rp = f"xl/worksheets/_rels/{sheetxml.split('/')[-1]}.rels"
+    for t in re.findall(r'Target="([^"]+)"', z.read(rp).decode()):
+        if 'tables/' in t: return 'xl/tables/' + t.split('/')[-1]
+    raise SystemExit('yield table not found')
 
 def last_friday(today=None):
     d = today or dt.date.today()
@@ -70,13 +86,60 @@ def col_letter(idx):  # 1->A
     while idx: idx, r = divmod(idx-1, 26); s = chr(65+r)+s
     return s
 
+
+SHEET_TPL = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+ '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+ 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+ '<dimension ref="A1:W10"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+ '<sheetFormatPr defaultRowHeight="15"/><sheetData></sheetData>'
+ '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>')
+
+def create_year_sheet(year):
+    """새해 시트(예: 2027)를 직전 연도 시트 뒤에 생성."""
+    z = zipfile.ZipFile(XLSX)
+    wbx = z.read('xl/workbook.xml').decode()
+    relx = z.read('xl/_rels/workbook.xml.rels').decode()
+    ctx = z.read('[Content_Types].xml').decode()
+    if f'<sheet name="{year}"' in wbx:
+        z.close(); return
+    n = max(int(m) for m in re.findall(r'worksheets/sheet(\d+)\.xml', relx)) + 1
+    rid = 'rId' + str(max(int(m) for m in re.findall(r'Id="rId(\d+)"', relx)) + 1)
+    sid = max(int(m) for m in re.findall(r'sheetId="(\d+)"', wbx)) + 1
+    prev_year = str(int(year) - 1)
+    anchor = re.search(rf'<sheet name="{prev_year}"[^/]*/>', wbx)
+    entry = f'<sheet name="{year}" sheetId="{sid}" r:id="{rid}"/>'
+    wbx2 = wbx.replace(anchor.group(0), anchor.group(0) + entry, 1) if anchor else wbx.replace('</sheets>', entry + '</sheets>', 1)
+    relx2 = relx.replace('</Relationships>',
+        f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{n}.xml"/></Relationships>', 1)
+    ctx2 = ctx.replace('</Types>',
+        f'<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>', 1)
+    tmp = XLSX + '.tmp.xlsx'
+    zo = zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED)
+    for it in z.infolist():
+        if it.filename == 'xl/workbook.xml': zo.writestr(it, wbx2)
+        elif it.filename == 'xl/_rels/workbook.xml.rels': zo.writestr(it, relx2)
+        elif it.filename == '[Content_Types].xml': zo.writestr(it, ctx2)
+        else: zo.writestr(it, z.read(it.filename))
+    zo.writestr(f'xl/worksheets/sheet{n}.xml', SHEET_TPL)
+    zo.close(); z.close()
+    import openpyxl; openpyxl.load_workbook(tmp, read_only=True)
+    shutil.move(tmp, XLSX)
+    print(f'created sheet {year}')
+
 def main():
     fri = last_friday()
     iso = fri.isocalendar()
     week = f'W{str(fri.year)[2:]}{iso[1]:02d}'
     for a in ARGS:
         if a.startswith('W') and len(a)==5: week=a
+    yname = '20' + week[1:3]
     z = zipfile.ZipFile(XLSX)
+    try:
+        SHEET_ = sheet_file(z, yname)
+    except SystemExit:
+        z.close(); create_year_sheet(yname)
+        z = zipfile.ZipFile(XLSX); SHEET_ = sheet_file(z, yname)
+    global SHEET; SHEET = SHEET_
     sx = z.read(SHEET).decode()
     # 이 스크립트가 만든 행(inlineStr 라벨)이면 → 최신 값으로 덮어쓰기, 아니면 신규 추가.
     # 사용자가 직접 입력한 라벨(shared string)이 있으면 건드리지 않고 종료.
@@ -85,7 +148,7 @@ def main():
     if not existing and (f'>{week}<' in sx):
         print(f'{week} exists as a manually entered row; not touching it'); return 0
     rownums = [int(m) for m in re.findall(r'<row r="(\d+)"', sx)]
-    maxr = max(rownums)
+    maxr = max(rownums) if rownums else 0
     newr = int(existing.group(1)) if existing else maxr + 2
     # previous closes: 마지막 스냅샷 행(덮어쓸 대상 행은 제외)
     prev = {}
@@ -99,6 +162,19 @@ def main():
                 prev = {NAMES[i]: float(cells[c]) for i,c in enumerate(['D','G','J','M','P','S','V'])}
                 lastWrow_xml = body
             except ValueError: pass
+    if not prev:
+        # 새해 첫 주: 직전 연도 시트의 마지막 스냅샷에서 가져옴
+        try:
+            psx = z.read(sheet_file(z, str(int(yname) - 1))).decode()
+            for rm in re.finditer(r'<row r="(\d+)"[^>]*>(.*?)</row>', psx, re.S):
+                body = rm.group(2)
+                cells = dict(re.findall(r'<c r="([A-Z]+)\d+"[^>]*>(?:<f>[^<]*</f>)?<v>([^<]*)</v></c>', body))
+                if all(k in cells for k in ('D','G','J','M','P','S','V')):
+                    try:
+                        prev = {NAMES[i]: float(cells[c]) for i,c in enumerate(['D','G','J','M','P','S','V'])}
+                        lastWrow_xml = body
+                    except ValueError: pass
+        except SystemExit: pass
     if not prev: print('previous snapshot row not found'); return 1
     # style ids from last snapshot row
     sty = dict(re.findall(r'<c r="([A-Z]+)\d+" s="(\d+)"', lastWrow_xml or ''))
@@ -122,6 +198,7 @@ def main():
         if closes[n] is not None:
             cells_xml.append(cell(cV, val=repr(closes[n])))
             if prev.get(n): cells_xml.append(cell(cP, val=repr(closes[n]/prev[n]-1)))
+    sx = sx.replace('<sheetData/>', '<sheetData></sheetData>')
     newrow = f'<row r="{newr}">' + ''.join(cells_xml) + '</row>'
     if existing:
         sx2 = sx.replace(existing.group(0), newrow, 1)
@@ -140,8 +217,8 @@ def main():
 
 
 # ===================== Yield 시트 자동 갱신 =====================
-YIELD_SHEET = 'xl/worksheets/sheet6.xml'
-YIELD_TABLE = 'xl/tables/table2.xml'
+YIELD_SHEET = None
+YIELD_TABLE = None
 EPOCH = dt.date(1899, 12, 30)
 TRE_COLS = ['1 Mo','2 Mo','3 Mo','6 Mo','1 Yr','2 Yr','3 Yr','5 Yr','7 Yr','10 Yr','20 Yr','30 Yr']  # -> C..N
 
@@ -190,6 +267,8 @@ def fetch_effr_range(d0, d1):
 
 def update_yield(test=False):
     z = zipfile.ZipFile(XLSX)
+    global YIELD_SHEET, YIELD_TABLE
+    YIELD_SHEET = sheet_file(z, 'Yield'); YIELD_TABLE = table_file(z, YIELD_SHEET)
     sx = z.read(YIELD_SHEET).decode()
     tx = z.read(YIELD_TABLE).decode()
     wx = z.read('xl/workbook.xml').decode()
@@ -275,6 +354,10 @@ def _rewrite(zin, replacements):
 def ensure_set_colors():
     """2026 시트: 주차 스냅샷의 이름+값+% 3칸을 %부호에 따라 세트로 빨강/파랑."""
     z = zipfile.ZipFile(XLSX)
+    yname = '20' + (f'W{str(last_friday().year)[2:]}')[1:3]
+    global SHEET
+    try: SHEET = sheet_file(z, yname)
+    except SystemExit: SHEET = sheet_file(z, '2026')
     sx = z.read(SHEET).decode()
     if 'priority="9101"' in sx:
         z.close(); print('set-colors: already applied'); return
@@ -307,12 +390,15 @@ def ensure_set_colors():
     for anchor in ['<hyperlinks', '<printOptions', '<pageMargins', '<pageSetup', '<drawing']:
         if anchor in sx:
             sx = sx.replace(anchor, cf + anchor, 1); break
+    else:
+        sx = sx.replace('</worksheet>', cf + '</worksheet>', 1)
     _rewrite(z, {SHEET: sx, 'xl/styles.xml': styles})
     print('set-colors: applied')
 
 def ensure_yield_formulas():
     """Yield 시트: O~S 수식이 빠진 데이터 행에 수식 채워넣기."""
     z = zipfile.ZipFile(XLSX)
+    global YIELD_SHEET; YIELD_SHEET = sheet_file(z, 'Yield')
     sx = z.read(YIELD_SHEET).decode()
     donor = None
     for rm in re.finditer(r'<row r="\d+"[^>]*>.*?</row>', sx, re.S):

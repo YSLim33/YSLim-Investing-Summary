@@ -57,12 +57,10 @@ details .body{border:1px solid var(--border);border-top:none;border-radius:0 0 1
 """
 # 상승=빨강(.up), 하락=파랑(.dn) — 한국식 컬러
 
+NAV_ITEMS = []  # 워크북 로드 후 연도 시트를 발견해 채움
+
 def page(title, active, body):
-    nav = ''.join(f'<a href="{h}" class="{"on" if k==active else ""}">{t}</a>' for t,h,k in [
-        ('최신 브리핑','index.html','index'),('퀵 링크','links.html','links'),
-        ('Orientation','orientation.html','orient'),('2026','archive-2026.html','2026'),
-        ('2025','archive-2025.html','2025'),('2023–2024','archive-2024.html','2024'),
-        ('Factset','factset.html','factset'),('Yield','yield.html','yield')])
+    nav = ''.join(f'<a href="{h}" class="{"on" if k==active else ""}">{t}</a>' for t,h,k in NAV_ITEMS)
     return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{H.escape(title)} · YSLim Investing</title><style>{CSS}</style></head>
@@ -185,21 +183,29 @@ def masked_rows(sheet):
         out.append(tuple(None if (c.value is not None and is_white(c)) else c.value for c in row))
     return out
 
-PAGES = []
-# 2026
-rows26 = masked_rows('2026'); img26, lnk26 = sheet_assets(zf, smap['2026'], 'y26')
-b26 = render_summary_sheet(rows26, img26, lnk26)
-open(os.path.join(SITE,'archive-2026.html'),'w',encoding='utf-8').write(page('2026 Archive','2026', archive_page(b26)))
-print('2026:', len(b26))
-# 2025 / ~2024
-rows25 = masked_rows('2025'); img25, lnk25 = sheet_assets(zf, smap['2025'], 'y25')
-b25 = render_summary_sheet(rows25, img25, lnk25)
-open(os.path.join(SITE,'archive-2025.html'),'w',encoding='utf-8').write(page('2025 Archive','2025', archive_page(b25)))
-print('2025:', len(b25))
+# 연도 시트 자동 발견 (2025, 2026, 2027, ...)
+years = sorted([n for n in wb.sheetnames if re.fullmatch(r'20\d{2}', n)], reverse=True)
+NAV_ITEMS.extend([('최신 브리핑','index.html','index'),('퀵 링크','links.html','links'),
+    ('Orientation','orientation.html','orient')])
+NAV_ITEMS.extend([(y, f'archive-{y}.html', y) for y in years])
+NAV_ITEMS.extend([('2023–2024','archive-2024.html','2024'),
+    ('Factset','factset.html','factset'),('Yield','yield.html','yield')])
+
+year_blocks = {}
+for y in years:
+    rws = masked_rows(y); im, lk = sheet_assets(zf, smap[y], 'y' + y[2:])
+    bl = render_summary_sheet(rws, im, lk)
+    year_blocks[y] = bl
+    open(os.path.join(SITE, f'archive-{y}.html'), 'w', encoding='utf-8').write(
+        page(f'{y} Archive', y, archive_page(bl)))
+    print(y + ':', len(bl))
 rows24 = masked_rows('Summary_~2024'); img24, lnk24 = sheet_assets(zf, smap['Summary_~2024'], 'y24')
 b24 = render_summary_sheet(rows24, img24, lnk24)
 open(os.path.join(SITE,'archive-2024.html'),'w',encoding='utf-8').write(page('2023–2024 Archive','2024', archive_page(b24)))
 print('~2024:', len(b24))
+# 최신 연도에 블록이 없으면(연초) 직전 연도 사용
+latest_year = next(y for y in years if year_blocks[y])
+b26 = year_blocks[latest_year]
 # Orientation
 rowsor = masked_rows('Orientation'); imgor, lnkor = sheet_assets(zf, smap['Orientation'], 'ori')
 orient_html = '<div class="card">' + render_rows(rowsor, imgor, lnkor, 1, len(rowsor), week_mode=False) + '</div>'
@@ -273,6 +279,6 @@ latest_lbl, latest_html = b26[-1]
 lg_small = ''.join(f'<a href="{u}" target="_blank"><div class="t">{esc(t)}</div><div class="s">{esc(s)}</div></a>' for t,u,s in LINKS6)
 idx = f"""<div class="card week"><h2 style="font-size:18px">최신 주간 브리핑 — {esc(latest_lbl)}</h2>{latest_html}</div>
 <div class="card"><h2>퀵 링크</h2><div class="linkgrid">{lg_small}</div></div>
-<p class="muted">과거 주차: <a href="archive-2026.html" style="color:var(--accent)">2026</a> · <a href="archive-2025.html" style="color:var(--accent)">2025</a> · <a href="archive-2024.html" style="color:var(--accent)">2023–2024</a></p>"""
+<p class="muted">과거 주차: {' · '.join(f'<a href="archive-{y}.html" style="color:var(--accent)">{y}</a>' for y in years)} · <a href="archive-2024.html" style="color:var(--accent)">2023–2024</a></p>"""
 open(os.path.join(SITE,'index.html'),'w',encoding='utf-8').write(page('최신 브리핑','index', idx))
 print('site built OK (privacy filter active)')
