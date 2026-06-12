@@ -200,7 +200,8 @@ def update_yield(test=False):
     last_date = EPOCH + dt.timedelta(days=last_serial)
     last_fed = float(re.search(r'<c r="B\d+"[^>]*><v>([^<]+)</v>', last).group(1))
     # 수식 셀(O~S)은 표 구조 참조라 행 번호 무관 - 그대로 복사
-    formulas = dict(re.findall(r'<c r="([O-S])\d+" s="3"><f>([^<]*)</f>', last))
+    formulas = dict(re.findall(r'<c r="([O-S])\d+"[^>]*><f>([^<]*)</f>', last))
+    colsty = dict(re.findall(r'<c r="([A-S])\d+" s="(\d+)"', last))  # 마지막 행의 열별 스타일
     fri = last_friday()
     need = []
     d = last_date + dt.timedelta(days=1)
@@ -225,16 +226,17 @@ def update_yield(test=False):
         if d not in tre: continue  # 휴장일
         r += 1
         serial = (d - EPOCH).days
-        cells = [f'<c r="A{r}" s="1"><v>{serial}</v></c>',
-                 f'<c r="B{r}" s="3"><v>{effr.get(d, last_fed)}</v></c>']
+        def sa(c): return f' s="{colsty[c]}"' if c in colsty else ''
+        cells = [f'<c r="A{r}"{sa("A")}><v>{serial}</v></c>',
+                 f'<c r="B{r}"{sa("B")}><v>{effr.get(d, last_fed)}</v></c>']
         for j, cn in enumerate(TRE_COLS):
             colL = chr(ord('C') + j)
-            sattr = ' s="3"' if colL in ('M', 'N') else ''
+            sattr = sa(colL)
             v = tre[d].get(cn)
             if v is not None: cells.append(f'<c r="{colL}{r}"{sattr}><v>{v}</v></c>')
         for colL in 'OPQRS':
             if colL in formulas:
-                cells.append(f'<c r="{colL}{r}" s="3"><f>{formulas[colL]}</f></c>')
+                cells.append(f'<c r="{colL}{r}"{sa(colL)}><f>{formulas[colL]}</f></c>')
         newrows.append(f'<row r="{r}" spans="1:19">' + ''.join(cells) + '</row>')
     if not newrows:
         print('Yield: no trading-day data fetched'); return
@@ -254,12 +256,103 @@ def update_yield(test=False):
     shutil.move(tmp, XLSX)
     print(f'Yield: {len(newrows)} rows added (through {need[-1]})')
 
+
+
+# ===================== 서식/수식 보정 (멱등) =====================
+RED_DXF = '<dxf><font><color rgb="FFFF0000"/></font></dxf>'
+BLUE_DXF = '<dxf><font><color rgb="FF0000FF"/></font></dxf>'
+TRIPLETS = [('C','E'),('F','H'),('I','K'),('L','N'),('O','Q'),('R','T'),('U','W')]
+
+def _rewrite(zin, replacements):
+    tmp = XLSX + '.tmp.xlsx'
+    zo = zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED)
+    for it in zin.infolist():
+        zo.writestr(it, replacements.get(it.filename, zin.read(it.filename)))
+    zo.close(); zin.close()
+    import openpyxl; openpyxl.load_workbook(tmp, read_only=True)
+    shutil.move(tmp, XLSX)
+
+def ensure_set_colors():
+    """2026 시트: 주차 스냅샷의 이름+값+% 3칸을 %부호에 따라 세트로 빨강/파랑."""
+    z = zipfile.ZipFile(XLSX)
+    sx = z.read(SHEET).decode()
+    if 'priority="9101"' in sx:
+        z.close(); print('set-colors: already applied'); return
+    styles = z.read('xl/styles.xml').decode()
+    m = re.search(r'<dxfs count="(\d+)">(.*?)</dxfs>', styles, re.S)
+    dxfs = re.findall(r'<dxf>.*?</dxf>', m.group(2), re.S) if m else []
+    def get_id(d):
+        return dxfs.index(d) if d in dxfs else None
+    red, blue = get_id(RED_DXF), get_id(BLUE_DXF)
+    if red is None or blue is None:
+        add = ('' if red is not None else RED_DXF) + ('' if blue is not None else BLUE_DXF)
+        if m:
+            styles = styles.replace(f'<dxfs count="{m.group(1)}">', f'<dxfs count="{int(m.group(1)) + add.count("<dxf>")}">', 1)
+            styles = styles.replace('</dxfs>', add + '</dxfs>', 1)
+        else:
+            block = f'<dxfs count="{add.count("<dxf>")}">{add}</dxfs>'
+            styles = styles.replace('<tableStyles', block + '<tableStyles', 1) if '<tableStyles' in styles else styles.replace('</styleSheet>', block + '</styleSheet>', 1)
+        if red is None: red = len(dxfs); dxfs.append(RED_DXF)
+        if blue is None: blue = len(dxfs); dxfs.append(BLUE_DXF)
+    blocks, pr = [], 9101
+    for c0, cp in TRIPLETS:
+        sq = f'{c0}1:{cp}3000'
+        blocks.append(
+            f'<conditionalFormatting sqref="{sq}">'
+            f'<cfRule type="expression" dxfId="{red}" priority="{pr}"><formula>AND(ISNUMBER(${cp}1),${cp}1&gt;0,${cp}1&lt;1)</formula></cfRule>'
+            f'<cfRule type="expression" dxfId="{blue}" priority="{pr+1}"><formula>AND(ISNUMBER(${cp}1),${cp}1&lt;0,${cp}1&gt;-1)</formula></cfRule>'
+            f'</conditionalFormatting>')
+        pr += 2
+    cf = ''.join(blocks)
+    for anchor in ['<hyperlinks', '<printOptions', '<pageMargins', '<pageSetup', '<drawing']:
+        if anchor in sx:
+            sx = sx.replace(anchor, cf + anchor, 1); break
+    _rewrite(z, {SHEET: sx, 'xl/styles.xml': styles})
+    print('set-colors: applied')
+
+def ensure_yield_formulas():
+    """Yield 시트: O~S 수식이 빠진 데이터 행에 수식 채워넣기."""
+    z = zipfile.ZipFile(XLSX)
+    sx = z.read(YIELD_SHEET).decode()
+    donor = None
+    for rm in re.finditer(r'<row r="\d+"[^>]*>.*?</row>', sx, re.S):
+        if re.search(r'<c r="O\d+"[^>]*><f>', rm.group(0)): donor = rm.group(0)
+    if donor is None:
+        z.close(); print('yield-formulas: no donor row'); return
+    formulas = dict(re.findall(r'<c r="([O-S])\d+"[^>]*><f>([^<]*)</f>', donor))
+    dsty = dict(re.findall(r'<c r="([O-S])\d+" s="(\d+)"', donor))
+    fixed = 0
+    def fix(rm):
+        nonlocal fixed
+        row = rm.group(0)
+        rno = rm.group(1)
+        if re.search(r'<c r="O\d+"', row): return row          # 이미 있음
+        if not re.search(r'<c r="B\d+"[^>]*><v>', row): return row  # 데이터 행 아님
+        if not re.search(r'<c r="A\d+"[^>]*><v>\d+</v>', row): return row
+        cells = ''
+        for colL in 'OPQRS':
+            if colL in formulas:
+                s = f' s="{dsty[colL]}"' if colL in dsty else ''
+                cells += f'<c r="{colL}{rno}"{s}><f>{formulas[colL]}</f></c>'
+        fixed += 1
+        return row[:-len('</row>')] + cells + '</row>'
+    sx2 = re.sub(r'<row r="(\d+)"[^>]*>.*?</row>', fix, sx, flags=re.S)
+    if not fixed:
+        z.close(); print('yield-formulas: all rows OK'); return
+    wx = z.read('xl/workbook.xml').decode()
+    wx2 = wx if 'fullCalcOnLoad' in wx else wx.replace('<calcPr calcId="191029"/>', '<calcPr calcId="191029" fullCalcOnLoad="1"/>')
+    _rewrite(z, {YIELD_SHEET: sx2, 'xl/workbook.xml': wx2})
+    print(f'yield-formulas: fixed {fixed} rows')
+
 def run_all():
     rc = main()
     try:
         update_yield(test=TEST)
     except Exception as e:
         print(f'Yield update failed: {e}')
+    for fn in (ensure_yield_formulas, ensure_set_colors):
+        try: fn()
+        except Exception as e: print(f'{fn.__name__} failed: {e}')
     return rc
 
 sys.exit(run_all())
