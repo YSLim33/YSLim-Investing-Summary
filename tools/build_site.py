@@ -65,6 +65,8 @@ details{margin-bottom:14px;}
 details summary{cursor:pointer;font-size:15px;color:var(--accent);padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:10px;}
 details[open] summary{border-radius:10px 10px 0 0;}
 details .body{border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;padding:12px 16px;background:#141a21;}
+@keyframes flashhl{0%{background:rgba(77,163,255,.5);}100%{background:transparent;}}
+details.flash summary{animation:flashhl 1.9s ease-out;}
 """
 # 상승=빨강(.up), 하락=파랑(.dn) — 한국식 컬러
 
@@ -81,6 +83,28 @@ def page(title, active, body):
 </div></body></html>"""
 
 def esc(x): return H.escape(str(x))
+
+# ---- 검색(Search) 인덱스 ----
+SEARCH_RECORDS = []
+def slugify(s):
+    s = re.sub(r'[^0-9A-Za-z가-힣]+', '-', str(s)).strip('-')
+    return s or 'sec'
+def html_to_text(s):
+    s = re.sub(r'<br\s*/?>', ' ', s)
+    s = re.sub(r'<[^>]+>', ' ', s)
+    return re.sub(r'\s+', ' ', H.unescape(s)).strip()
+def add_record(title, url, group, text, external=False, week=None):
+    text = (text or '').strip()
+    if not text: return
+    rec = {'t': title, 'u': url, 'g': group, 'x': text}
+    if external: rec['e'] = 1
+    if week is not None: rec['w'] = week
+    SEARCH_RECORDS.append(rec)
+def index_blocks(blocks, page_url, group):
+    for lbl, bh in blocks:
+        m = re.match(r'W(\d+)', str(lbl))
+        add_record(str(lbl), f'{page_url}#{slugify(lbl)}', group,
+                   html_to_text(bh), week=int(m.group(1)) if m else None)
 
 def sheet_xml_map(zf):
     wbx = zf.read('xl/workbook.xml').decode()
@@ -174,12 +198,19 @@ def render_summary_sheet(rows, imgs, links):
         blocks.append((lbl, render_rows(rows, imgs, links, s, e)))
     return blocks
 
+# 검색 결과 등에서 #해시로 들어오면 해당 주차를 펼치고 스크롤·하이라이트
+ARCHIVE_HASH_JS = """<script>
+(function(){function go(){var h=decodeURIComponent((location.hash||'').slice(1));if(!h)return;var el=document.getElementById(h);if(!el)return;if(el.tagName==='DETAILS')el.open=true;el.scrollIntoView({behavior:'smooth',block:'start'});el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
+window.addEventListener('DOMContentLoaded',go);window.addEventListener('hashchange',go);})();
+</script>"""
+
 def archive_page(blocks, latest_open=False):
     parts = []
     for k, (lbl, bh) in enumerate(reversed(blocks)):
         op = ' open' if (latest_open and k == 0) else ''
-        parts.append(f'<details{op}><summary>{esc(lbl)}</summary><div class="body week">{bh}</div></details>')
-    return f'<p class="muted">{len(blocks)}개 주차 · 최신순 · 제목을 누르면 펼쳐집니다</p>' + '\n'.join(parts)
+        parts.append(f'<details id="{slugify(lbl)}"{op}><summary>{esc(lbl)}</summary><div class="body week">{bh}</div></details>')
+    return (f'<p class="muted">{len(blocks)}개 주차 · 최신순 · 제목을 누르면 펼쳐집니다</p>'
+            + '\n'.join(parts) + ARCHIVE_HASH_JS)
 
 # ---------- load ----------
 import openpyxl
@@ -201,18 +232,20 @@ NAV_ITEMS.extend([('최신 브리핑','index.html','index'),('퀵 링크','links
 NAV_ITEMS.extend([(y, f'archive-{y}.html', y) for y in years])
 NAV_ITEMS.extend([('2023–2024','archive-2024.html','2024'),
     ('Factset','factset.html','factset'),('Yield','yield.html','yield'),
-    ('Q&A','qna.html','qna')])
+    ('Q&A','qna.html','qna'),('🔍 검색','search.html','search')])
 
 year_blocks = {}
 for y in years:
     rws = masked_rows(y); im, lk = sheet_assets(zf, smap[y], 'y' + y[2:])
     bl = render_summary_sheet(rws, im, lk)
     year_blocks[y] = bl
+    index_blocks(bl, f'archive-{y}.html', f'{y} 주간')
     open(os.path.join(SITE, f'archive-{y}.html'), 'w', encoding='utf-8').write(
         page(f'{y} Archive', y, archive_page(bl)))
     print(y + ':', len(bl))
 rows24 = masked_rows('Summary_~2024'); img24, lnk24 = sheet_assets(zf, smap['Summary_~2024'], 'y24')
 b24 = render_summary_sheet(rows24, img24, lnk24)
+index_blocks(b24, 'archive-2024.html', '2023–2024 주간')
 open(os.path.join(SITE,'archive-2024.html'),'w',encoding='utf-8').write(page('2023–2024 Archive','2024', archive_page(b24)))
 print('~2024:', len(b24))
 # 최신 연도에 블록이 없으면(연초) 직전 연도 사용
@@ -221,9 +254,15 @@ b26 = year_blocks[latest_year]
 # Orientation
 rowsor = masked_rows('Orientation'); imgor, lnkor = sheet_assets(zf, smap['Orientation'], 'ori')
 orient_html = '<div class="card">' + render_rows(rowsor, imgor, lnkor, 1, len(rowsor), week_mode=False) + '</div>'
+for ln in re.findall(r'<div class="line">(.*?)</div>', orient_html, re.S):
+    t = html_to_text(ln)
+    if len(t) >= 4:
+        add_record(t[:42] + ('…' if len(t) > 42 else ''), 'orientation.html', 'Orientation', t)
 open(os.path.join(SITE,'orientation.html'),'w',encoding='utf-8').write(page('Orientation','orient',
   '<p class="muted">지표 체계 설명서 — Orientation 시트</p>' + orient_html))
 # links
+for t,u,s in LINKS6:
+    add_record(t, u, '퀵 링크', f'{t} {s}', external=True)
 lg = ''.join(f'<a href="{u}" target="_blank"><div class="t">{i+1}. {esc(t)}</div><div class="s">{esc(s)}</div></a>' for i,(t,u,s) in enumerate(LINKS6))
 open(os.path.join(SITE,'links.html'),'w',encoding='utf-8').write(page('퀵 링크','links',
   f'<p class="muted">Summary 시트 상단 고정 링크 6개</p><div class="linkgrid">{lg}</div>'))
@@ -250,12 +289,16 @@ open(os.path.join(SITE,'qna.html'),'w',encoding='utf-8').write(page('Q&A','qna',
 # factset / yield
 fs_rows = [tuple(c.value for c in r) for r in wb['Factset'].iter_rows()]
 fs = [[r[0].strftime('%Y-%m-%d')] + [float(x) if isinstance(x,(int,float)) else None for x in r[1:8]] for r in fs_rows if r and hasattr(r[0],'strftime')]
+add_record('Factset — 실적·가이던스·FWD PER', 'factset.html', 'Factset',
+    'Factset earnings growth positive negative guidance FWD 12M PER forward 5Y 10Y average 실적 성장 긍정 부정 가이던스 밸류에이션 멀티플 ' + ' '.join(r[0] for r in fs))
 yd_rows = [tuple(c.value for c in r) for r in wb['Yield'].iter_rows()]
 yh = [str(x) for x in yd_rows[0][:19]]
 yd = []
 for r in yd_rows[1:]:
     if r[0] is None or not hasattr(r[0],'strftime'): continue
     yd.append([r[0].strftime('%Y-%m-%d')] + [float(x) if isinstance(x,(int,float)) else None for x in r[1:19]])
+add_record('Yield — 미국채 금리·수익률 곡선', 'yield.html', 'Yield',
+    'Yield 금리 국채 수익률 곡선 yield curve treasury spread 장단기 EFFR SOFR 10Y2Y 10Y3M ' + ' '.join(yh) + ' ' + ' '.join(r[0] for r in yd))
 CHART_HDR = '<script src="assets/chart.umd.js"></script>'
 JSBASE = "Chart.defaults.color='#8b98a5';Chart.defaults.borderColor='#2a3441';"
 fs_table_rows = ''.join('<tr>' + ''.join(f'<td>{("" if v is None else (f"{v:.1f}" if isinstance(v,float) and i!=4 else (f"{v*100:.1f}%" if i==4 and v is not None else v)))}</td>' for i,v in enumerate(r)) + '</tr>' for r in reversed(fs[-30:]))
@@ -313,4 +356,99 @@ idx = f"""<div class="card week"><h2 style="font-size:18px">최신 주간 브리
 <div class="card"><h2>퀵 링크</h2><div class="linkgrid">{lg_small}</div></div>
 <p class="muted">과거 주차: {' · '.join(f'<a href="archive-{y}.html" style="color:var(--accent)">{y}</a>' for y in years)} · <a href="archive-2024.html" style="color:var(--accent)">2023–2024</a></p>"""
 open(os.path.join(SITE,'index.html'),'w',encoding='utf-8').write(page('최신 브리핑','index', idx))
+# ---- 검색 페이지 (search.html) : 한/영 OR 검색, 인덱스 임베드 ----
+SEARCH_CSS = """<style>
+.sbox{position:relative;margin:8px 0 14px;}
+.sbox input{width:100%;font-size:16px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px 42px 14px 16px;outline:none;}
+.sbox input:focus{border-color:var(--accent);}
+.sbox .clr{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:30px;height:30px;line-height:28px;text-align:center;cursor:pointer;color:var(--muted);font-size:20px;background:none;border:none;display:none;}
+.sbox .clr:hover{color:var(--text);}
+.hint{color:var(--muted);font-size:12.5px;margin:0 2px 8px;line-height:1.6;}
+.hint b{color:var(--text);}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px;}
+.chip{font-size:12.5px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:5px 11px;cursor:pointer;}
+.chip:hover{border-color:var(--accent);color:var(--accent);}
+.chip .n{color:var(--muted);margin-left:6px;font-size:11.5px;}
+.sumline{color:var(--muted);font-size:13px;margin:16px 2px 10px;}
+.sumline b{color:var(--text);}
+a.res{display:block;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:11px 14px;margin-bottom:9px;text-decoration:none;}
+a.res:hover,a.res.sel{border-color:var(--accent);background:#1f2a35;}
+.res .top{display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap;}
+.badge{font-size:11px;color:var(--accent);border:1px solid var(--accent);border-radius:6px;padding:1px 7px;white-space:nowrap;}
+.res .ttl{font-weight:600;font-size:14.5px;color:var(--text);}
+.res .arrow{margin-left:auto;color:var(--muted);font-size:11.5px;white-space:nowrap;}
+.snip{font-size:13px;line-height:1.65;color:var(--muted);}
+.snip mark{background:rgba(210,153,34,.32);color:#ffd866;border-radius:3px;padding:0 2px;}
+.empty{color:var(--muted);font-size:13.5px;padding:16px 2px;line-height:1.7;}
+kbd{background:var(--card);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;color:var(--muted);}
+</style>"""
+
+SEARCH_JS = r'''(function(){
+var IDX=SEARCH_INDEX;for(var i=0;i<IDX.length;i++)IDX[i]._l=IDX[i].x.toLowerCase();
+var qEl=document.getElementById('q'),out=document.getElementById('out'),clr=document.getElementById('clr');
+var sel=-1,cur=[];
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function rxesc(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+function terms(q){var a=q.toLowerCase().split(/\s+/).filter(Boolean),u=[];for(var i=0;i<a.length;i++)if(u.indexOf(a[i])<0)u.push(a[i]);return u;}
+function run(q){
+ var ts=terms(q);cur=[];sel=-1;
+ if(!ts.length){render(ts,null);return;}
+ var rx=new RegExp('('+ts.map(rxesc).join('|')+')','gi');
+ for(var i=0;i<IDX.length;i++){
+  var r=IDX[i],L=r._l,matched=[],occ=0;
+  for(var j=0;j<ts.length;j++){var t=ts[j],k=L.indexOf(t);if(k>=0){matched.push(t);var c=0,p=k;while(p>=0){c++;p=L.indexOf(t,p+t.length);}occ+=c;}}
+  if(matched.length){var score=matched.length*1e6+Math.min(occ,999)*100+(r.w?r.w%10000:0)/10000;cur.push({r:r,matched:matched,score:score});}
+ }
+ cur.sort(function(a,b){return b.score-a.score;});
+ render(ts,rx);
+}
+function snippet(r,rx){
+ var x=r.x;rx.lastIndex=0;var m=rx.exec(r._l);var first=m?m.index:0;
+ var start=Math.max(0,first-70),end=Math.min(x.length,first+210);
+ var s=esc(x.slice(start,end)).replace(rx,'<mark>$1</mark>');
+ return (start>0?'… ':'')+s+(end<x.length?' …':'');
+}
+function render(ts,rx){
+ if(!ts||!ts.length){out.innerHTML='<p class="empty">키워드를 입력하면 결과가 여기에 표시됩니다.<br>총 <b>'+IDX.length+'</b>개 항목이 색인되어 있습니다. 한글·영문을 함께 적으면 더 잘 찾습니다.</p>';clr.style.display='none';return;}
+ clr.style.display='block';
+ var tchips=ts.map(function(t){var n=cur.filter(function(h){return h.matched.indexOf(t)>=0;}).length;return '<span class="chip">'+esc(t)+'<span class="n">'+n+'</span></span>';}).join(' ');
+ var label='‘'+ts.map(esc).join('’ 또는 ‘')+'’';
+ if(!cur.length){out.innerHTML='<p class="sumline">'+label+' — 결과 없음</p><div class="chips">'+tchips+'</div><p class="empty">일치하는 내용이 없습니다. 다른 키워드나 영문/한글 표기를 함께 입력해 보세요.</p>';return;}
+ var cap=Math.min(cur.length,200),html='';
+ for(var i=0;i<cap;i++){var h=cur[i],r=h.r,ext=r.e?' target="_blank" rel="noopener"':'';
+  html+='<a class="res" href="'+r.u+'"'+ext+'><div class="top"><span class="badge">'+esc(r.g)+'</span><span class="ttl">'+esc(r.t)+'</span><span class="arrow">'+h.matched.length+'/'+ts.length+' 일치 →</span></div><div class="snip">'+snippet(r,rx)+'</div></a>';
+ }
+ if(cur.length>cap)html+='<p class="empty">상위 '+cap+'개만 표시했습니다. 키워드를 더해 좁혀 보세요.</p>';
+ out.innerHTML='<p class="sumline">'+label+' — <b>'+cur.length+'</b>개 결과</p><div class="chips">'+tchips+'</div>'+html;
+}
+var deb;function onInput(){clearTimeout(deb);deb=setTimeout(function(){run(qEl.value);sync();},110);}
+function sync(){try{history.replaceState(null,'',location.pathname+(qEl.value?'?q='+encodeURIComponent(qEl.value):''));}catch(e){}}
+qEl.addEventListener('input',onInput);
+clr.addEventListener('click',function(){qEl.value='';qEl.focus();run('');sync();});
+[].forEach.call(document.querySelectorAll('.chip[data-q]'),function(c){c.addEventListener('click',function(){qEl.value=c.getAttribute('data-q');qEl.focus();run(qEl.value);sync();});});
+qEl.addEventListener('keydown',function(e){
+ var items=out.querySelectorAll('a.res');
+ if(e.key==='ArrowDown'||e.key==='ArrowUp'){if(!items.length)return;e.preventDefault();sel+=e.key==='ArrowDown'?1:-1;if(sel<0)sel=items.length-1;if(sel>=items.length)sel=0;[].forEach.call(items,function(it){it.classList.remove('sel');});items[sel].classList.add('sel');items[sel].scrollIntoView({block:'nearest'});}
+ else if(e.key==='Enter'){if(sel>=0&&items[sel])items[sel].click();else if(items[0])items[0].click();}
+ else if(e.key==='Escape'){qEl.value='';run('');sync();}
+});
+var q0=new URLSearchParams(location.search).get('q')||'';qEl.value=q0;run(q0);
+})();'''
+
+_sugg = ['테슬라 TSLA','금리 yield','인플레이션 inflation','유동성 liquidity','로보택시 robotaxi','이더리움 ETH BMNR','반도체 SOXX','가이던스 guidance']
+_chips = ''.join(f'<button class="chip" data-q="{esc(s)}">{esc(s)}</button>' for s in _sugg)
+_search_top = ('<div class="card"><h2>🔍 통합 검색</h2>'
+ '<p class="hint">한글·영문 키워드로 Summary 전체(주간 브리핑·Orientation·Factset·Yield·퀵 링크)를 검색합니다. '
+ '여러 단어는 띄어쓰기로 구분하며 <b>OR</b>(하나라도 포함) 조건으로 찾고, 더 많은 단어가 일치할수록 위로 정렬됩니다.</p>'
+ '<div class="sbox"><input id="q" type="text" placeholder="예) 테슬라 TSLA 로보택시" autocomplete="off" autofocus>'
+ '<button class="clr" id="clr" title="지우기">×</button></div>'
+ '<div class="chips">' + _chips + '</div>'
+ '<p class="hint"><kbd>↑</kbd> <kbd>↓</kbd> 이동 · <kbd>Enter</kbd> 열기 · <kbd>Esc</kbd> 지우기</p></div>'
+ '<div id="out"></div>')
+_index_js = json.dumps(SEARCH_RECORDS, ensure_ascii=False).replace('</', '<\\/')
+search_body = (SEARCH_CSS + _search_top
+ + '<script>const SEARCH_INDEX=' + _index_js + ';</script>\n'
+ + '<script>' + SEARCH_JS + '</script>')
+open(os.path.join(SITE,'search.html'),'w',encoding='utf-8').write(page('검색','search', search_body))
+print('search index records:', len(SEARCH_RECORDS))
 print('site built OK (privacy filter active)')
