@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip install openpyxl
@@ -19,4 +21,11 @@ jobs:
           git config user.name "auto-week-bot"
           git config user.email "actions@github.com"
           git add "YSLim_Investing Summary.xlsx"
-          git diff --cached --quiet || git commit -m "auto: weekly snapshot row" && git push
+          git diff --cached --quiet || git commit -m "auto: weekly snapshot row"
+      - name: Push using PAT to trigger other workflows
+        env:
+          PAT: ${{ secrets.PERSONAL_TOKEN }}
+        run: |
+          # Set origin to use PAT so push is authenticated by the PAT (this will trigger other workflows)
+          git remote set-url origin https://x-access-token:${PAT}@github.com/${{ github.repository }}.git
+          git push origin HEAD:main
