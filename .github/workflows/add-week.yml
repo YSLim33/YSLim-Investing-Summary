@@ -2,7 +2,7 @@ name: Add Weekly Snapshot Row
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8 * * 6'  # 토요일 17:00 KST (토요일 08:00 UTC)
+    - cron: '0 8 * * 6'
 permissions:
   contents: write
 jobs:
@@ -26,6 +26,5 @@ jobs:
         env:
           PAT: ${{ secrets.PERSONAL_TOKEN }}
         run: |
-          # Set origin to use PAT so push is authenticated by the PAT (this will trigger other workflows)
           git remote set-url origin https://x-access-token:${PAT}@github.com/${{ github.repository }}.git
           git push origin HEAD:main
